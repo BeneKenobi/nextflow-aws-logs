@@ -6,7 +6,6 @@ import botocore.exceptions
 import pytest
 
 from nextflow_aws_logs.main import (
-    _get_all_log_events,
     _make_session,
     _ms_to_utc,
     _paginate_batch,
@@ -137,106 +136,6 @@ def test_paginate_batch_passes_next_token_on_continuation():
 # ---------------------------------------------------------------------------
 
 
-def _make_logs_client(pages: list[tuple[list[dict], str | None]]) -> MagicMock:
-    """Build a mock CloudWatch Logs client from a list of (events, next_token) pages.
-
-    Each page is a tuple of (event_list, nextForwardToken). The final page
-    should repeat the same token as the one that will be sent to it, which is
-    how CloudWatch signals exhaustion.
-    """
-    responses = []
-    for events, token in pages:
-        resp: dict = {"events": events}
-        if token is not None:
-            resp["nextForwardToken"] = token
-        responses.append(resp)
-
-    client = MagicMock()
-    client.get_log_events.side_effect = responses
-    return client
-
-
-def test_get_all_log_events_single_page():
-    """A single page where the returned token equals the sent token (None) stops immediately."""
-    event = {"timestamp": 1000, "message": "hello"}
-    # First call: no token sent (None). Returned token is "tok-1".
-    # Second call: token "tok-1" sent. Returned token is "tok-1" again → exhausted.
-    client = _make_logs_client(
-        [
-            ([event], "tok-1"),
-            ([], "tok-1"),
-        ]
-    )
-    result = _get_all_log_events(client, "lg", "ls")
-    assert result == [event]
-    assert client.get_log_events.call_count == 2
-
-
-def test_get_all_log_events_multiple_pages():
-    """Events from all pages are accumulated in order."""
-    e1 = {"timestamp": 1000, "message": "a"}
-    e2 = {"timestamp": 2000, "message": "b"}
-    e3 = {"timestamp": 3000, "message": "c"}
-    # Page 1: token None sent, "tok-1" returned
-    # Page 2: token "tok-1" sent, "tok-2" returned
-    # Page 3: token "tok-2" sent, "tok-2" returned → exhausted
-    client = _make_logs_client(
-        [
-            ([e1], "tok-1"),
-            ([e2], "tok-2"),
-            ([e3], "tok-2"),
-        ]
-    )
-    result = _get_all_log_events(client, "lg", "ls")
-    assert result == [e1, e2, e3]
-    assert client.get_log_events.call_count == 3
-
-
-def test_get_all_log_events_empty_stream():
-    """An empty stream returns an empty list immediately on token match."""
-    # First call returns no events and a token. Second call returns same token.
-    client = _make_logs_client(
-        [
-            ([], "tok-x"),
-            ([], "tok-x"),
-        ]
-    )
-    result = _get_all_log_events(client, "lg", "ls")
-    assert result == []
-
-
-def test_get_all_log_events_passes_correct_params():
-    """The helper passes logGroupName, logStreamName, and startFromHead=True."""
-    client = _make_logs_client(
-        [
-            ([], "t"),
-            ([], "t"),
-        ]
-    )
-    _get_all_log_events(client, "my-group", "my-stream")
-    first_call_kwargs = client.get_log_events.call_args_list[0].kwargs
-    assert first_call_kwargs["logGroupName"] == "my-group"
-    assert first_call_kwargs["logStreamName"] == "my-stream"
-    assert first_call_kwargs["startFromHead"] is True
-
-
-def test_get_all_log_events_token_threaded_correctly():
-    """The nextForwardToken from page N is sent as nextToken on page N+1."""
-    client = _make_logs_client(
-        [
-            ([], "tok-A"),
-            ([], "tok-B"),
-            ([], "tok-B"),
-        ]
-    )
-    _get_all_log_events(client, "lg", "ls")
-    calls = client.get_log_events.call_args_list
-    # Second call should carry nextToken="tok-A"
-    assert calls[1].kwargs.get("nextToken") == "tok-A"
-    # Third call should carry nextToken="tok-B"
-    assert calls[2].kwargs.get("nextToken") == "tok-B"
-
-
 # ---------------------------------------------------------------------------
 # _make_session tests
 # ---------------------------------------------------------------------------
@@ -270,74 +169,9 @@ class TestMakeSessionRegionValidation:
         assert exc.value.code == 1
 
 
-class TestMakeSessionCredentialValidation:
-    def test_partial_key_only_exits(self):
-        """Exits when only AWS_ACCESS_KEY_ID is set (secret missing)."""
-        env = {"AWS_REGION": "us-east-1", "AWS_ACCESS_KEY_ID": "AKID"}
-        with patch.dict("os.environ", env, clear=True):
-            with pytest.raises(SystemExit) as exc:
-                _make_session()
-        assert exc.value.code == 1
-
-    def test_partial_secret_only_exits(self):
-        """Exits when only AWS_SECRET_ACCESS_KEY is set (key ID missing)."""
-        env = {"AWS_REGION": "us-east-1", "AWS_SECRET_ACCESS_KEY": "secret"}
-        with patch.dict("os.environ", env, clear=True):
-            with pytest.raises(SystemExit) as exc:
-                _make_session()
-        assert exc.value.code == 1
-
-    def test_profile_not_found_exits(self):
-        """Exits with code 1 when the named profile does not exist."""
-        env = {"AWS_REGION": "us-east-1", "AWS_PROFILE": "nonexistent-profile"}
-        with patch.dict("os.environ", env, clear=True):
-            with patch(
-                "boto3.Session",
-                side_effect=botocore.exceptions.ProfileNotFound(
-                    profile="nonexistent-profile"
-                ),
-            ):
-                with pytest.raises(SystemExit) as exc:
-                    _make_session()
-        assert exc.value.code == 1
-
-
-class TestMakeSessionCredentialResolution:
-    def test_explicit_keys_path(self):
-        """Uses explicit key/secret when both are set; region propagates."""
-        env = {
-            "AWS_REGION": "eu-west-1",
-            "AWS_ACCESS_KEY_ID": "MYKEY",
-            "AWS_SECRET_ACCESS_KEY": "MYSECRET",
-        }
-        with patch.dict("os.environ", env, clear=True):
-            with patch("boto3.Session") as mock_session_cls:
-                mock_session_cls.return_value = MagicMock()
-                session, region = _make_session()
-
-        mock_session_cls.assert_called_once_with(
-            aws_access_key_id="MYKEY",
-            aws_secret_access_key="MYSECRET",
-            region_name="eu-west-1",
-        )
-        assert region == "eu-west-1"
-
-    def test_named_profile_path(self):
-        """Uses profile_name when AWS_PROFILE is set and keys are absent."""
-        env = {"AWS_REGION": "ap-southeast-1", "AWS_PROFILE": "my-profile"}
-        with patch.dict("os.environ", env, clear=True):
-            with patch("boto3.Session") as mock_session_cls:
-                mock_session_cls.return_value = MagicMock()
-                session, region = _make_session()
-
-        mock_session_cls.assert_called_once_with(
-            profile_name="my-profile",
-            region_name="ap-southeast-1",
-        )
-        assert region == "ap-southeast-1"
-
+class TestMakeSessionDefaultBehavior:
     def test_default_chain_path(self):
-        """Falls back to default credential chain when no creds env vars are set."""
+        """Creates session with region name via default credential chain."""
         env = {"AWS_REGION": "us-west-2"}
         with patch.dict("os.environ", env, clear=True):
             with patch("boto3.Session") as mock_session_cls:
