@@ -37,6 +37,22 @@ The tool reads configuration from environment variables (or a `.env` file in the
 
 If neither explicit keys nor a profile are set, the tool falls back to the default boto3 credential chain (instance profile, ECS task role, etc.).
 
+## Docker
+
+This package is also available as a [docker container](https://github.com/orgs/MHH-Humangenetik/packages/container/package/nextflow-aws-logs).
+
+Example:
+
+```shell
+docker run \
+  -t \
+  -e AWS_REGION=eu-central-1 \
+  -e AWS_ACCESS_KEY_ID=XXX \
+  -e AWS_SECRET_ACCESS_KEY=XXX \
+  ghcr.io/mhh-humangenetik/nextflow-aws-logs:main \
+  nextflow-aws-logs show-log --job-name my_job --queue my_queue
+```
+
 ## IAM permissions required
 
 ```json
