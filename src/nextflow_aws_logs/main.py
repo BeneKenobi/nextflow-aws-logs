@@ -270,10 +270,9 @@ def show_log(ctx: click.Context, job_name: str, queue: str) -> None:
         )
         sys.exit(1)
 
-    with console.pager():
-        for event in events:
-            ts = _ms_to_utc(event["timestamp"]).isoformat()
-            console.print(f"{ts} - {event['message']}")
+    for event in events:
+        ts = _ms_to_utc(event["timestamp"]).isoformat()
+        console.print(f"{ts} - {event['message']}")
 
 
 @cli.command("list-queues")
